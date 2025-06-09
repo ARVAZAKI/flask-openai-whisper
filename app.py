@@ -17,12 +17,10 @@ UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
 
-# Optimized Whisper model loading with device detection
 print("Initializing Whisper...")
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {device}")
 
-# Use 'tiny' model for maximum speed (you can change to 'base' or 'small' if needed)
 whisper_model = whisper.load_model("tiny", device=device)
 print("✓ Whisper model loaded (tiny - fastest)")
 
@@ -32,87 +30,63 @@ if not gemini_api_key:
 
 genai.configure(api_key=gemini_api_key)
 
-# Optimized Gemini configuration for faster response
 model = genai.GenerativeModel(
     model_name=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"), 
     generation_config={
         "temperature": float(os.getenv("GEMINI_TEMPERATURE", "0.3")),
         "top_p": 0.9,
-        "max_output_tokens": int(os.getenv("GEMINI_MAX_TOKENS", "700")),  # Further reduced
+        "max_output_tokens": int(os.getenv("GEMINI_MAX_TOKENS", "700")),  
         "candidate_count": 1,
     }
 )
 
-# Thread pool for parallel processing
 executor = ThreadPoolExecutor(max_workers=2)
 
-SCORING_RUBRIC = {
-    "Advanced": {"min": 25, "max": 30},
-    "High-Intermediate": {"min": 20, "max": 24},
-    "Low-Intermediate": {"min": 16, "max": 19},
-    "Basic": {"min": 10, "max": 15},
-    "Below Basic": {"min": 0, "max": 9}
-}
 
-WRITING_SCORING_RUBRIC = {
-    "Advanced": {"min": 24, "max": 30},
-    "High-Intermediate": {"min": 17, "max": 23},
-    "Low-Intermediate": {"min": 13, "max": 16},
-    "Basic": {"min": 7, "max": 12},
-    "Below Basic": {"min": 0, "max": 6}
-}
+SPEAKING_PROMPT_TEMPLATE = """TOEFL IBT Speaking Evaluator. Rate this speaking response on a scale of 0-7.5:
 
-# Ultra-optimized prompt templates
-SPEAKING_PROMPT_TEMPLATE = """TOEFL Speaking Evaluator. Rate this response:
+Question: {question}
+Response: {answer_text}
 
-Q: {question}
-A: {answer_text}
-Target: {target_level}
+Evaluate based on delivery, language use, and topic development.
+Give a score from 0 to 7.5 (decimals allowed).
 
-Rate 0-30: Advanced(25-30), High-Int(20-24), Low-Int(16-19), Basic(10-15), Below(0-9)
-
-JSON only:
+Return JSON only:
 {{
-    "score": [number],
-    "level": "[level]",
-    "target_level": "{target_level}",
-    "meets_target": [true/false],
-    "feedback": "[brief feedback using 'you']",
-    "strengths": ["strength1", "strength2"]
-}}"""
-
-WRITING_PROMPT_TEMPLATE = """TOEFL Writing Evaluator. Rate this response:
-
-Q: {question}
-A: {answer_text}
-Target: {target_level}
-
-Rate 0-30: Advanced(24-30), High-Int(17-23), Low-Int(13-16), Basic(7-12), Below(0-6)
-
-JSON only:
-{{
-    "score": [number],
-    "level": "[level]",
-    "target_level": "{target_level}",
-    "meets_target": [true/false],
-    "feedback": "[brief feedback using 'you']",
+    "score": [decimal number 0-7.5],
+    "feedback": "[brief constructive feedback using 'you']",
     "strengths": ["strength1", "strength2"],
     "areas_for_improvement": ["area1", "area2"]
 }}"""
 
-def get_gemini_assessment_fast(question, answer_text, target_level):
-    """Optimized Gemini assessment for speaking"""
+WRITING_PROMPT_TEMPLATE = """TOEFL IBT Writing Evaluator. Rate this writing response on a scale of 0-30:
+
+Question: {question}
+Response: {answer_text}
+
+Evaluate based on organization, language use, vocabulary, and coherence.
+Give a score from 0 to 30 (whole numbers only).
+
+Return JSON only:
+{{
+    "score": [number 0-30],
+    "feedback": "[brief constructive feedback using 'you']",
+    "strengths": ["strength1", "strength2"],
+    "areas_for_improvement": ["area1", "area2"]
+}}"""
+
+def get_gemini_assessment_fast(question, answer_text):
+    """Optimized Gemini assessment for speaking (0-7.5 scale)"""
     prompt = SPEAKING_PROMPT_TEMPLATE.format(
-        question=question[:200],  # Limit question length
-        answer_text=answer_text[:500],  # Limit answer length for speed
-        target_level=target_level
+        question=question[:500],  
+        answer_text=answer_text[:500]  
     )
 
     try:
         start_time = time.time()
         response = model.generate_content(
             prompt,
-            request_options={"timeout": 12}  # Reduced timeout
+            request_options={"timeout": 12} 
         )
         
         processing_time = time.time() - start_time
@@ -124,31 +98,31 @@ def get_gemini_assessment_fast(question, answer_text, target_level):
         
         assessment = json.loads(response_text)
         assessment['processing_time'] = round(processing_time, 2)
+        
+        if 'score' in assessment:
+            assessment['score'] = max(0, min(7.5, float(assessment['score'])))
+        
         return assessment
         
     except (json.JSONDecodeError, Exception) as e:
         print(f"Assessment error: {str(e)}")
-        # Quick fallback scoring based on word count and basic rules
         word_count = len(answer_text.split())
-        fallback_score = min(25, max(5, word_count // 3))  # Simple scoring
+        fallback_score = min(7.5, max(1.0, word_count / 20))  # Simple scoring for 0-7.5
         
         return {
-            "score": fallback_score,
-            "level": "Basic" if fallback_score < 16 else "Low-Intermediate",
-            "target_level": target_level,
-            "meets_target": False,
+            "score": round(fallback_score, 1),
             "feedback": "Your response was processed with basic evaluation due to system optimization.",
             "strengths": ["Response provided", "Attempted the task"],
+            "areas_for_improvement": ["Detailed evaluation pending"],
             "processing_time": 0.5,
             "fallback": True
         }
 
-def get_gemini_writing_assessment_fast(question, answer_text, target_level):
-    """Optimized Gemini assessment for writing"""
+def get_gemini_writing_assessment_fast(question, answer_text):
+    """Optimized Gemini assessment for writing (0-30 scale)"""
     prompt = WRITING_PROMPT_TEMPLATE.format(
-        question=question[:200],
-        answer_text=answer_text[:800],  # Slightly longer for writing
-        target_level=target_level
+        question=question[:500],
+        answer_text=answer_text[:800]  
     )
 
     try:
@@ -167,19 +141,19 @@ def get_gemini_writing_assessment_fast(question, answer_text, target_level):
         
         assessment = json.loads(response_text)
         assessment['processing_time'] = round(processing_time, 2)
+        
+        if 'score' in assessment:
+            assessment['score'] = max(0, min(30, int(assessment['score'])))
+        
         return assessment
         
     except (json.JSONDecodeError, Exception) as e:
         print(f"Writing assessment error: {str(e)}")
-        # Quick fallback scoring
         word_count = len(answer_text.split())
         fallback_score = min(28, max(5, word_count // 5))
         
         return {
             "score": fallback_score,
-            "level": "Basic" if fallback_score < 13 else "Low-Intermediate",
-            "target_level": target_level,
-            "meets_target": False,
             "feedback": "Your writing was processed with basic evaluation due to system optimization.",
             "strengths": ["Writing provided", "Attempted the task"],
             "areas_for_improvement": ["Detailed evaluation pending"],
@@ -189,7 +163,7 @@ def get_gemini_writing_assessment_fast(question, answer_text, target_level):
 
 @app.route('/assess-speaking', methods=['POST'])
 def assess_speaking():
-    """Ultra-optimized endpoint for TOEFL speaking assessment"""
+    """Ultra-optimized endpoint for TOEFL speaking assessment (0-7.5 scale)"""
     start_time = time.time()
     
     if 'audio' not in request.files:
@@ -197,39 +171,25 @@ def assess_speaking():
     
     if 'question' not in request.form:
         return jsonify({'error': 'Question is required'}), 400
-        
-    if 'type' not in request.form:
-        return jsonify({'error': 'Target level is required'}), 400
 
     question = request.form['question']
-    target_level = request.form['type']  
     audio_file = request.files['audio']
-
-    valid_levels = ["Advanced", "High-Intermediate", "Low-Intermediate", "Basic", "Below Basic"]
-    if target_level not in valid_levels:
-        return jsonify({
-            'error': 'Invalid target level',
-            'valid_levels': valid_levels
-        }), 400
 
     filename = secure_filename(audio_file.filename)
     filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
     
     try:
-        # Save file
         audio_file.save(filepath)
         
-        # Optimized transcription
         print("Transcribing audio (local - fast mode)...")
         transcription_start = time.time()
         
-        # Ultra-fast transcription settings
         transcription_result = whisper_model.transcribe(
             filepath,
             fp16=False,
             verbose=False,
-            condition_on_previous_text=False,  # Disable context for speed
-            temperature=0,  # Deterministic for speed
+            condition_on_previous_text=False,  
+            temperature=0,  
             compression_ratio_threshold=2.4,
             logprob_threshold=-1.0,
             no_speech_threshold=0.6
@@ -239,7 +199,7 @@ def assess_speaking():
         transcription_time = time.time() - transcription_start
         print(f"Transcription time: {transcription_time:.2f}s")
         
-        min_words = int(os.getenv("MIN_WORDS_THRESHOLD", "3"))  # Reduced threshold
+        min_words = int(os.getenv("MIN_WORDS_THRESHOLD", "3"))  
         if not answer_text or len(answer_text.split()) < min_words:
             return jsonify({
                 'error': f'Audio transcription is too short (minimum {min_words} words).',
@@ -247,16 +207,14 @@ def assess_speaking():
                 'transcription_time': round(transcription_time, 2)
             }), 400
         
-        # Get assessment
         print("Getting assessment...")
-        assessment = get_gemini_assessment_fast(question, answer_text, target_level)
+        assessment = get_gemini_assessment_fast(question, answer_text)
         
         total_time = time.time() - start_time
         
         response_data = {
             'transcription': answer_text,
             'question': question,
-            'target_level': target_level,
             'assessment': assessment,
             'status': 'success',
             'performance': {
@@ -277,7 +235,6 @@ def assess_speaking():
         }), 500
         
     finally:
-        # Clean up file
         try:
             if os.path.exists(filepath):
                 os.remove(filepath)
@@ -286,28 +243,20 @@ def assess_speaking():
 
 @app.route('/assess-writing', methods=['POST'])
 def assess_writing():
-    """Optimized endpoint for TOEFL writing assessment"""
+    """Optimized endpoint for TOEFL writing assessment (0-30 scale)"""
     start_time = time.time()
     
     data = request.get_json()
     if not data:
         return jsonify({'error': 'Request must contain JSON data'}), 400
     
-    required_fields = ['question', 'answer', 'type']
+    required_fields = ['question', 'answer']
     for field in required_fields:
         if field not in data:
             return jsonify({'error': f'{field} is required'}), 400
 
     question = data['question'].strip()
     answer_text = data['answer'].strip()
-    target_level = data['type']
-
-    valid_levels = ["Advanced", "High-Intermediate", "Low-Intermediate", "Basic", "Below Basic"]
-    if target_level not in valid_levels:
-        return jsonify({
-            'error': 'Invalid target level',
-            'valid_levels': valid_levels
-        }), 400
 
     min_words = int(os.getenv("MIN_WORDS_THRESHOLD", "8"))
     word_count = len(answer_text.split()) if answer_text else 0
@@ -320,14 +269,13 @@ def assess_writing():
 
     try:
         print("Getting writing assessment...")
-        assessment = get_gemini_writing_assessment_fast(question, answer_text, target_level)
+        assessment = get_gemini_writing_assessment_fast(question, answer_text)
         
         total_time = time.time() - start_time
         
         response_data = {
             'question': question,
             'answer': answer_text,
-            'target_level': target_level,
             'word_count': word_count,
             'assessment': assessment,
             'status': 'success',
@@ -354,16 +302,20 @@ def health_check():
         'whisper_model': 'tiny-local',
         'device': device,
         'gemini_configured': bool(os.getenv("GEMINI_API_KEY")),
-        'optimization': 'maximum-speed-local'
+        'optimization': 'maximum-speed-local',
+        'scoring_system': {
+            'speaking': '0-7.5 scale (direct scoring)',
+            'writing': '0-30 scale (direct scoring)'
+        }
     })
 
-@app.route('/scoring-rubric', methods=['GET'])
-def get_scoring_rubric():
-    """Get TOEFL scoring rubric"""
+@app.route('/scoring-info', methods=['GET'])
+def get_scoring_info():
+    """Get TOEFL scoring information"""
     return jsonify({
-        'speaking_rubric': SCORING_RUBRIC,
-        'writing_rubric': WRITING_SCORING_RUBRIC,
-        'valid_levels': ["Advanced", "High-Intermediate", "Low-Intermediate", "Basic", "Below Basic"]
+        'speaking_scale': '0-7.5 (decimals allowed)',
+        'writing_scale': '0-30 (whole numbers)',
+        'description': 'Direct scoring without rubric categories'
     })
 
 @app.route('/config', methods=['GET'])
@@ -377,17 +329,22 @@ def get_config():
         'max_tokens': int(os.getenv("GEMINI_MAX_TOKENS", "700")),
         'min_words_threshold': int(os.getenv("MIN_WORDS_THRESHOLD", "3")),
         'upload_folder': UPLOAD_FOLDER,
+        'scoring_system': {
+            'speaking_range': '0-7.5 (decimals)',
+            'writing_range': '0-30 (integers)',
+            'no_rubric_categories': True
+        },
         'optimizations': {
             'whisper_tiny_model': True,
             'gpu_acceleration': device == 'cuda',
             'reduced_max_tokens': True,
             'fast_transcription': True,
             'fallback_scoring': True,
-            'ultra_optimized_prompts': True
+            'ultra_optimized_prompts': True,
+            'no_target_level_required': True
         }
     })
 
-# Model switching endpoint for testing different speeds
 @app.route('/switch-model/<model_name>', methods=['POST'])
 def switch_whisper_model(model_name):
     """Switch Whisper model for testing (tiny/base/small)"""
@@ -426,4 +383,5 @@ if __name__ == '__main__':
     print(f"✓ Starting ultra-optimized Flask server (FREE local mode) on {host}:{port}")
     print(f"✓ Whisper model: tiny (fastest)")
     print(f"✓ Device: {device}")
+    print(f"✓ Scoring: Speaking (0-7.5), Writing (0-30)")
     app.run(host=host, port=port, debug=debug, threaded=True)
